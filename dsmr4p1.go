@@ -98,7 +98,7 @@ func ParseValueWithUnit(input string) (value float64, unit string, err error) {
 }
 
 // Starts polling and attempts to parse a telegram.
-func startPolling(input io.Reader, ch chan Telegram) {
+func startPolling(input io.Reader, ch chan Telegram, preDSMR4 bool) {
 	br := bufio.NewReader(input)
 	for {
 		// Read until we find a '/', which should be the beginning of the telegram.
@@ -123,6 +123,12 @@ func startPolling(input io.Reader, ch chan Telegram) {
 			log.Println(err)
 			continue
 		}
+		// pre DMRS4 smartmeter do not have a crc check: in that case, put the data into a Telegram
+		// log.Println(data)
+		if (preDSMR4){
+			   t := Telegram(data)
+			   ch <- t
+		} else {
 		// The four hexadecimal characters are the CRC-16 of the preceding data, delimitted by
 		// a carriage return.
 		crcBytes, err := br.ReadBytes('\n')
@@ -144,6 +150,7 @@ func startPolling(input io.Reader, ch chan Telegram) {
 		} else {
 			log.Printf("CRC values do not match: %s vs %s\n", dataCRC, computedCRC)
 		}
+		}
 	}
 	// Close the channel (should only happen with EOF, allows for clean exit).
 	close(ch)
@@ -152,9 +159,9 @@ func startPolling(input io.Reader, ch chan Telegram) {
 // Poll starts polling the P1 port represented by input (an io.Reader). It will
 // start a goroutine and received telegrams are put into returned channel. Only
 // telegrams whose CRC value are correct are put into the channel.
-func Poll(input io.Reader) chan Telegram {
+func Poll(input io.Reader, preDSMR4 bool) chan Telegram {
 	ch := make(chan Telegram)
-	go startPolling(input, ch)
+	go startPolling(input, ch, preDSMR4)
 	return ch
 }
 
