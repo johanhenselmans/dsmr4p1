@@ -2,20 +2,21 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
-	"encoding/json"
 	"strconv"
 	//import the Paho Go MQTT library
 	MQTT "github.com/eclipse/paho.mqtt.golang"
-//	"github.com/mhe/dsmr4p1"
+	//	"github.com/mhe/dsmr4p1"
 	"../../dsmr4p1"
 	"github.com/tarm/serial"
+	"io"
 	"log"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
-
-	"io"
 )
 
 var testfile = flag.String("testfile", "", "Testfile to use instead of serial port")
@@ -34,24 +35,23 @@ type WoodyZappRequestMessage struct {
 	ResponseTopic string
 }
 
-
 func main() {
 	fmt.Println("p1read")
 	flag.Parse()
 
 	var input io.Reader
-
 	var err error
+
 	boolpreDSMR4 := *preDSMR4
 
 	if *testfile == "" {
-	   // for now:
-	   c := &serial.Config{Name: *device, Baud: *baudrate, Size: 7, Parity: serial.ParityEven}
-	   if boolpreDSMR4{
-		c = &serial.Config{Name: *device, Baud: *baudrate, Size: 7, Parity: serial.ParityEven}
-	   } else {
-		c = &serial.Config{Name: *device, Baud: *baudrate, Size: 8, Parity: serial.ParityNone}
-	   }
+		// for now:
+		c := &serial.Config{Name: *device, Baud: *baudrate, Size: 7, Parity: serial.ParityEven}
+		if boolpreDSMR4 {
+			c = &serial.Config{Name: *device, Baud: *baudrate, Size: 7, Parity: serial.ParityEven}
+		} else {
+			c = &serial.Config{Name: *device, Baud: *baudrate, Size: 8, Parity: serial.ParityNone}
+		}
 		input, err = serial.OpenPort(c)
 		if err != nil {
 			log.Fatal(err)
@@ -66,6 +66,7 @@ func main() {
 			input = dsmr4p1.RateLimit(input, time.Duration(*ratelimit)*time.Second)
 		}
 	}
+
 	opts := MQTT.NewClientOptions().AddBroker("tcp://localhost:1883")
 	opts.SetClientID("woodyzapp-dsmrreader")
 
@@ -75,46 +76,73 @@ func main() {
 		panic(token.Error())
 	}
 
-
 	boolpreDSMR4 = *preDSMR4
 
-	ch := dsmr4p1.Poll(input, boolpreDSMR4)
-//	ch := dsmr4p1.Poll(input)
-	for t := range ch {
-		r, err := t.Parse()
-		if err != nil {
-			fmt.Println("Error in telegram parsing:", err)
-			continue
-		}
-		
-		fmt.Println("Received telegram")
-		/*
-		timestamp := r["0-0:1.0.0"][0]
-		ts, err := dsmr4p1.ParseTimestamp(timestamp)
-		if err != nil {
-			fmt.Println("Error in time parsing:", err)
-			continue
-		}
-		fmt.Println("Timestamp:", ts)
-		*/
-		fmt.Println("Electricty power delivered:", r["1-0:1.8.0"][0])
-		fmt.Println("Electricty power received: ", r["1-0:2.8.0"][0])
-		
-		type PowerUsageMessage struct {
-			PowerDelivered    string
-			PowerReceived  string
-			SensorType   string
-		}
-		woodytempMessage := PowerUsageMessage{}
-		woodytempMessage.PowerDelivered = fmt.Sprintf("%s", r["1-0:1.8.0"][0])
-		woodytempMessage.PowerReceived = fmt.Sprintf("%s", r["1-0:2.8.0"][0])
-		woodytempMessage.SensorType = fmt.Sprintf("%s", "ISKRA DSMRPre4.0")
-		woodyusagejson,_ := json.Marshal(woodytempMessage)
-		woodyMessage := WoodyZappRequestMessage{Version: "v1", Timestamp_UTC: strconv.FormatInt(time.Now().UTC().UnixNano(), 10), Action: "/status/PowerUsage", Message: string(woodyusagejson), ResponseTopic: "" }
-		text, _ := json.Marshal(woodyMessage)
-		token := mqttclient.Publish("/woodyzapp/hal/status/PowerUsage", 0, false, text)
-		token.Wait()
+	// See https://github.com/goiot/devices/wiki/Cleanly-exiting-a-program  for cleanly exiting program
+	// channel to push to if we want to exit in a clean way
+	quitCh := make(chan bool)
 
-}
-	fmt.Println("Done. Exiting.")
+	// catch signals
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh,
+		syscall.SIGHUP,
+		syscall.SIGINT,
+		syscall.SIGTERM,
+		syscall.SIGQUIT)
+
+	// monitor for signals in the background
+	go func() {
+		s := <-sigCh
+		fmt.Println("\nreceived signal:", s)
+		quitCh <- true
+	}()
+
+	ch := dsmr4p1.Poll(input, boolpreDSMR4)
+	//	ch := dsmr4p1.Poll(input)
+
+	for {
+		select {
+		case <-quitCh:
+			fmt.Println("Done. Exiting.")
+
+		case <-ch:
+			for t := range ch {
+				tmpdate:= time.Now().UTC()
+				r, err := t.Parse()
+				if err != nil {
+					fmt.Println(tmpdate," Error in telegram parsing:", err)
+					continue
+				}
+				fmt.Println(tmpdate, " Received telegram")
+				/*
+					timestamp := r["0-0:1.0.0"][0]
+					ts, err := dsmr4p1.ParseTimestamp(timestamp)
+					if err != nil {
+						fmt.Println("Error in time parsing:", err)
+						continue
+					}
+					fmt.Println("Timestamp:", ts)
+				*/
+				fmt.Println(tmpdate," Electricty power delivered:", r["1-0:1.8.0"][0])
+				fmt.Println(tmpdate, "Electricty power received: ", r["1-0:2.8.0"][0])
+
+				type PowerUsageMessage struct {
+					PowerDelivered string
+					PowerReceived  string
+					SensorType     string
+				}
+				woodytempMessage := PowerUsageMessage{}
+				woodytempMessage.PowerDelivered = fmt.Sprintf("%s", r["1-0:1.8.0"][0])
+				woodytempMessage.PowerReceived = fmt.Sprintf("%s", r["1-0:2.8.0"][0])
+				woodytempMessage.SensorType = fmt.Sprintf("%s", "ISKRA DSMRPre4.0")
+				woodyusagejson, _ := json.Marshal(woodytempMessage)
+				woodyMessage := WoodyZappRequestMessage{Version: "v1", Timestamp_UTC: strconv.FormatInt(time.Now().UTC().UnixNano(), 10), Action: "/status/PowerUsage", Message: string(woodyusagejson), ResponseTopic: ""}
+				text, _ := json.Marshal(woodyMessage)
+				token := mqttclient.Publish("/woodyzapp/hal/status/PowerUsage", 0, false, text)
+				token.Wait()
+
+			}
+
+		}
+	}
 }
